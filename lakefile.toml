@@ -1,0 +1,13 @@
+name = "LR1-generator"
+version = "0.1.0"
+defaultTargets = ["lr1-generator"]
+
+[[lean_lib]]
+name = "LR1Generator"
+
+[[lean_lib]]
+name = "eBNFparser"
+
+[[lean_exe]]
+name = "lr1-generator"
+root = "Main"
