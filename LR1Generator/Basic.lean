@@ -274,13 +274,129 @@ partial def canonicalCollection (g : Grammar) : List ItemSet :=
       go (rest ++ newSets) (collection ++ newSets)
   go [i0] [i0]
 
+/-! ## LR(1) 遷移表の構築 -/
+
+/-- パース動作 -/
+inductive Action where
+  | shift : Nat → Action
+  | reduce : Nat → Production → Action  -- 生成規則番号と規則
+  | accept : Action
+  deriving BEq, Repr
+
+instance : ToString Action where
+  toString
+    | .shift n => s!"s{n}"
+    | .reduce n p => s!"r{n}({p})"
+    | .accept => "acc"
+
+/-- 衝突の種類 -/
+inductive Conflict where
+  | shiftReduce : Nat → Lookahead → Action → Action → Conflict
+  | reduceReduce : Nat → Lookahead → Action → Action → Conflict
+  deriving Repr
+
+instance : ToString Conflict where
+  toString
+    | .shiftReduce state la a1 a2 =>
+      s!"shift/reduce 衝突 状態{state}, {la}: {a1} vs {a2}"
+    | .reduceReduce state la a1 a2 =>
+      s!"reduce/reduce 衝突 状態{state}, {la}: {a1} vs {a2}"
+
+/-- LR(1) 遷移表 -/
+structure ParseTable where
+  actionTable : List (Nat × Lookahead × Action)
+  gotoTable : List (Nat × String × Nat)
+  conflicts : List Conflict
+  numStates : Nat
+  deriving Repr
+
+/-- 項目集合族から状態番号を検索 -/
+def findStateIndex (collection : List ItemSet) (target : ItemSet) : Option Nat :=
+  let rec go (sets : List ItemSet) (idx : Nat) : Option Nat :=
+    match sets with
+    | [] => none
+    | s :: rest => if itemSetEq s target then some idx else go rest (idx + 1)
+  go collection 0
+
+/-- 生成規則の番号を検索 -/
+def findProdIndex (g : Grammar) (p : Production) : Nat :=
+  let rec go (prods : List Production) (idx : Nat) : Nat :=
+    match prods with
+    | [] => idx
+    | q :: rest => if q == p then idx else go rest (idx + 1)
+  go g.productions 0
+
+/-- LR(1) 遷移表を構築する -/
+def buildParseTable (g : Grammar) (collection : List ItemSet) : ParseTable :=
+  let nullable := computeNullable g
+  let firstMap := computeFirstMap g nullable
+  -- 各状態について ACTION と GOTO のエントリを生成
+  let (actions, gotos, _) := collection.foldl (fun (acts, gts, i) items =>
+    -- ACTION: 各項目から動作を決定
+    let acts := items.foldl (fun acts item =>
+      match item.nextSymbol with
+      | some (.terminal t) =>
+        let target := goto_ g nullable firstMap items (.terminal t)
+        match findStateIndex collection target with
+        | some j => acts ++ [(i, Lookahead.terminal t, Action.shift j)]
+        | none => acts
+      | some (.nonterminal _) => acts
+      | none =>
+        if item.prod.lhs == g.startSymbol then
+          acts ++ [(i, item.lookahead, Action.accept)]
+        else
+          let prodIdx := findProdIndex g item.prod
+          acts ++ [(i, item.lookahead, Action.reduce prodIdx item.prod)]
+    ) acts
+    -- GOTO: 非終端記号による遷移
+    let gts := g.allSymbols.foldl (fun gts sym =>
+      match sym with
+      | .nonterminal nt =>
+        let target := goto_ g nullable firstMap items (.nonterminal nt)
+        match findStateIndex collection target with
+        | some j => gts ++ [(i, nt, j)]
+        | none => gts
+      | .terminal _ => gts
+    ) gts
+    (acts, gts, i + 1)
+  ) (([], [], 0) : List (Nat × Lookahead × Action) × List (Nat × String × Nat) × Nat)
+  -- 重複を除去して衝突を検出
+  let (uniqueActions, conflicts) := actions.foldl (fun acc entry =>
+    let (unique, confs) := acc
+    let (s, la, act) := entry
+    match unique.find? (fun (s', la', _) => s == s' && la == la') with
+    | some (_, _, existing) =>
+      if existing == act then (unique, confs)
+      else
+        let conflict := match existing, act with
+          | .shift _, .reduce .. | .reduce .., .shift _ =>
+            Conflict.shiftReduce s la existing act
+          | _, _ => Conflict.reduceReduce s la existing act
+        (unique, confs ++ [conflict])
+    | none => (unique ++ [(s, la, act)], confs)
+  ) ((([] : List (Nat × Lookahead × Action)), ([] : List Conflict)))
+  { actionTable := uniqueActions
+    gotoTable := gotos
+    conflicts := conflicts
+    numStates := collection.length }
+
+/-- 状態の ACTION エントリを取得 -/
+def ParseTable.getAction (t : ParseTable) (state : Nat) (la : Lookahead) : Option Action :=
+  t.actionTable.find? (fun (s, l, _) => s == state && l == la) |>.map (·.2.2)
+
+/-- 状態の GOTO エントリを取得 -/
+def ParseTable.getGoto (t : ParseTable) (state : Nat) (nt : String) : Option Nat :=
+  t.gotoTable.find? (fun (s, n, _) => s == state && n == nt) |>.map (·.2.2)
+
 /-! ## 表示ユーティリティ -/
 
 def printGrammar (g : Grammar) : IO Unit := do
   IO.println s!"開始記号: {g.startSymbol}"
   IO.println "生成規則:"
+  let mut i := 0
   for p in g.productions do
-    IO.println s!"  {p}"
+    IO.println s!"  ({i}) {p}"
+    i := i + 1
 
 def printItemSets (sets : List ItemSet) : IO Unit := do
   for h : i in [:sets.length] do
@@ -288,6 +404,26 @@ def printItemSets (sets : List ItemSet) : IO Unit := do
     for item in sets[i] do
       IO.println s!"  {item}"
     IO.println ""
+
+/-- 遷移表を状態ごとに表示する -/
+def printParseTable (table : ParseTable) : IO Unit := do
+  for i in [:table.numStates] do
+    let stateActions := table.actionTable.filter (·.1 == i)
+    let stateGotos := table.gotoTable.filter (·.1 == i)
+    if !stateActions.isEmpty || !stateGotos.isEmpty then
+      IO.println s!"状態 {i}:"
+      for (_, la, act) in stateActions do
+        IO.println s!"  ACTION[{la}] = {act}"
+      for (_, nt, target) in stateGotos do
+        IO.println s!"  GOTO[{nt}] = {target}"
+  if !table.conflicts.isEmpty then
+    IO.println ""
+    IO.println s!"⚠ 衝突 {table.conflicts.length} 件:"
+    for c in table.conflicts do
+      IO.println s!"  {c}"
+  else
+    IO.println ""
+    IO.println "衝突なし — LR(1) 文法です"
 
 /-! ## 動作確認 -/
 
@@ -302,4 +438,5 @@ def printItemSets (sets : List ItemSet) : IO Unit := do
     let sets := canonicalCollection g
     IO.println s!"状態数: {sets.length}"
     IO.println ""
-    printItemSets sets
+    let table := buildParseTable g sets
+    printParseTable table
