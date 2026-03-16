@@ -1,5 +1,6 @@
 import LR1Generator
 import eBNFparser
+import lexer
 
 def usage : String :=
   "Usage: lr1-generator <grammar.ebnf> [output.c]\n\n" ++
@@ -48,8 +49,11 @@ def main (args : List String) : IO UInt32 := do
         for c in table.conflicts do
           IO.eprintln s!"  {c}"
 
-      -- 5. C コード生成
-      writeCFile outputPath g table
+      -- 5. レキサー + パーサーの C コード生成
+      let terminals := collectTerminals g
+      let toTokName := fun t => s!"TOK_{toCIdentifier t.toUpper}"
+      let lexerCode := generateLexerC terminals toTokName
+      writeCFile outputPath g table (middleCode := "\n" ++ lexerCode ++ "\n")
       IO.println s!"[5/5] 完了: {outputPath}"
 
       return 0

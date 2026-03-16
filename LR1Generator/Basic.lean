@@ -485,8 +485,9 @@ def lookaheadIndex (terminals : List String) (la : Lookahead) : Int :=
   | .terminal t => terminalIndex terminals t
   | .endMarker => terminals.length  -- $ は末尾
 
-/-- C言語のLR(1)パーサーコードを生成する -/
-def generateC (g : Grammar) (table : ParseTable) : String := Id.run do
+/-- C言語のLR(1)パーサーコードを生成する。
+    (ヘッダー+テーブル+parse関数, main関数) のペアを返す。 -/
+def generateC (g : Grammar) (table : ParseTable) : String × String := Id.run do
   let terminals := collectTerminals g
   let nonterminals := collectNonterminals g
   let numTerminals := terminals.length + 1  -- +1 for $
@@ -657,27 +658,79 @@ def generateC (g : Grammar) (table : ParseTable) : String := Id.run do
   code := code ++ s!"    {rb}\n"
   code := code ++ s!"{rb}\n\n"
 
-  -- main 関数（使用例）
-  code := code ++ "/* Example usage */\n"
-  code := code ++ s!"int main(void) {lb}\n"
-  code := code ++ "    /* Provide your token stream here */\n"
+  -- ここまでがパーサー本体（ヘッダー + テーブル + parse 関数）
+  let parserCore := code
 
-  -- 例: 全終端記号のトークンを1つずつ並べる
-  let exampleTokens := terminals.map (fun t => s!"TOK_{toCIdentifier t.toUpper}")
-  let tokStr := ", ".intercalate exampleTokens
-  code := code ++ s!"    int tokens[] = {lb}{tokStr}{rb};\n"
-  code := code ++ s!"    int num_tokens = sizeof(tokens) / sizeof(tokens[0]);\n"
+  -- main 関数: コマンドライン引数またはファイルからパース
+  let mut mainCode := ""
+  mainCode := mainCode ++ s!"/* Read entire file into malloc'd buffer. Returns length, or -1 on error. */\n"
+  mainCode := mainCode ++ s!"static int read_file(const char *path, char **out) {lb}\n"
+  mainCode := mainCode ++ s!"    FILE *f = fopen(path, \"rb\");\n"
+  mainCode := mainCode ++ s!"    if (!f) {lb} perror(path); return -1; {rb}\n"
+  mainCode := mainCode ++ s!"    fseek(f, 0, SEEK_END);\n"
+  mainCode := mainCode ++ s!"    long sz = ftell(f);\n"
+  mainCode := mainCode ++ s!"    fseek(f, 0, SEEK_SET);\n"
+  mainCode := mainCode ++ s!"    *out = (char *)malloc(sz + 1);\n"
+  mainCode := mainCode ++ s!"    if (!*out) {lb} fclose(f); return -1; {rb}\n"
+  mainCode := mainCode ++ s!"    fread(*out, 1, sz, f);\n"
+  mainCode := mainCode ++ s!"    (*out)[sz] = '\\0';\n"
+  mainCode := mainCode ++ s!"    fclose(f);\n"
+  mainCode := mainCode ++ s!"    return (int)sz;\n"
+  mainCode := mainCode ++ s!"{rb}\n\n"
 
-  code := code ++ "    int result = parse(tokens, num_tokens);\n"
-  code := code ++ s!"    return (result == 0) ? EXIT_SUCCESS : EXIT_FAILURE;\n"
-  code := code ++ s!"{rb}\n"
+  mainCode := mainCode ++ s!"int main(int argc, char **argv) {lb}\n"
+  mainCode := mainCode ++ s!"    const char *input = NULL;\n"
+  mainCode := mainCode ++ s!"    int input_len = 0;\n"
+  mainCode := mainCode ++ s!"    char *file_buf = NULL;\n\n"
+  mainCode := mainCode ++ s!"    if (argc < 2) {lb}\n"
+  mainCode := mainCode ++ s!"        fprintf(stderr, \"Usage: %s <input-string-or-file>\\n\", argv[0]);\n"
+  mainCode := mainCode ++ s!"        return EXIT_FAILURE;\n"
+  mainCode := mainCode ++ s!"    {rb}\n\n"
+  mainCode := mainCode ++ s!"    /* Try to open as file first, fall back to treating as string */\n"
+  mainCode := mainCode ++ s!"    int flen = read_file(argv[1], &file_buf);\n"
+  mainCode := mainCode ++ s!"    if (flen >= 0) {lb}\n"
+  mainCode := mainCode ++ s!"        input = file_buf;\n"
+  mainCode := mainCode ++ s!"        input_len = flen;\n"
+  mainCode := mainCode ++ s!"    {rb} else {lb}\n"
+  mainCode := mainCode ++ s!"        /* Concatenate all arguments as input string */\n"
+  mainCode := mainCode ++ s!"        int total = 0;\n"
+  mainCode := mainCode ++ s!"        for (int i = 1; i < argc; i++) {lb}\n"
+  mainCode := mainCode ++ s!"            int l = 0; while(argv[i][l]) l++;\n"
+  mainCode := mainCode ++ s!"            total += l + (i > 1 ? 1 : 0);\n"
+  mainCode := mainCode ++ s!"        {rb}\n"
+  mainCode := mainCode ++ s!"        file_buf = (char *)malloc(total + 1);\n"
+  mainCode := mainCode ++ s!"        int pos = 0;\n"
+  mainCode := mainCode ++ s!"        for (int i = 1; i < argc; i++) {lb}\n"
+  mainCode := mainCode ++ s!"            if (i > 1) file_buf[pos++] = ' ';\n"
+  mainCode := mainCode ++ s!"            int l = 0; while(argv[i][l]) file_buf[pos++] = argv[i][l++];\n"
+  mainCode := mainCode ++ s!"        {rb}\n"
+  mainCode := mainCode ++ s!"        file_buf[pos] = '\\0';\n"
+  mainCode := mainCode ++ s!"        input = file_buf;\n"
+  mainCode := mainCode ++ s!"        input_len = pos;\n"
+  mainCode := mainCode ++ s!"    {rb}\n\n"
 
-  code
+  mainCode := mainCode ++ s!"    /* Tokenize */\n"
+  mainCode := mainCode ++ s!"    #define MAX_INPUT_TOKENS 65536\n"
+  mainCode := mainCode ++ s!"    int tokens[MAX_INPUT_TOKENS];\n"
+  mainCode := mainCode ++ s!"    int num_tokens = tokenize(input, input_len, tokens, MAX_INPUT_TOKENS);\n"
+  mainCode := mainCode ++ s!"    free(file_buf);\n\n"
+  mainCode := mainCode ++ s!"    if (num_tokens < 0) {lb}\n"
+  mainCode := mainCode ++ s!"        return EXIT_FAILURE;\n"
+  mainCode := mainCode ++ s!"    {rb}\n\n"
 
-/-- 生成した C コードをファイルに書き出す -/
-def writeCFile (path : System.FilePath) (g : Grammar) (table : ParseTable) : IO Unit := do
-  let code := generateC g table
-  IO.FS.writeFile path code
+  mainCode := mainCode ++ s!"    /* Parse */\n"
+  mainCode := mainCode ++ s!"    int result = parse(tokens, num_tokens);\n"
+  mainCode := mainCode ++ s!"    return (result == 0) ? EXIT_SUCCESS : EXIT_FAILURE;\n"
+  mainCode := mainCode ++ s!"{rb}\n"
+
+  (parserCore, mainCode)
+
+/-- 生成した C コードをファイルに書き出す。
+    middleCode: パーサー本体と main の間に挿入するコード（レキサー等） -/
+def writeCFile (path : System.FilePath) (g : Grammar) (table : ParseTable)
+    (middleCode : String := "") : IO Unit := do
+  let (parserCore, mainCode) := generateC g table
+  IO.FS.writeFile path (parserCore ++ middleCode ++ mainCode)
   IO.println s!"C コードを {path} に出力しました"
 
 /-! ## 動作確認 -/

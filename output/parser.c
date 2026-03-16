@@ -169,11 +169,65 @@ int parse(const int *tokens, int num_tokens) {
     }
 }
 
-/* Example usage */
-int main(void) {
-    /* Provide your token stream here */
-    int tokens[] = {TOK_PLUS, TOK_STAR, TOK_LPAREN, TOK_RPAREN, TOK_ID};
-    int num_tokens = sizeof(tokens) / sizeof(tokens[0]);
+/* Read entire file into malloc'd buffer. Returns length, or -1 on error. */
+static int read_file(const char *path, char **out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); return -1; }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    *out = (char *)malloc(sz + 1);
+    if (!*out) { fclose(f); return -1; }
+    fread(*out, 1, sz, f);
+    (*out)[sz] = '\0';
+    fclose(f);
+    return (int)sz;
+}
+
+int main(int argc, char **argv) {
+    const char *input = NULL;
+    int input_len = 0;
+    char *file_buf = NULL;
+
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <input-string-or-file>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    /* Try to open as file first, fall back to treating as string */
+    int flen = read_file(argv[1], &file_buf);
+    if (flen >= 0) {
+        input = file_buf;
+        input_len = flen;
+    } else {
+        /* Concatenate all arguments as input string */
+        int total = 0;
+        for (int i = 1; i < argc; i++) {
+            int l = 0; while(argv[i][l]) l++;
+            total += l + (i > 1 ? 1 : 0);
+        }
+        file_buf = (char *)malloc(total + 1);
+        int pos = 0;
+        for (int i = 1; i < argc; i++) {
+            if (i > 1) file_buf[pos++] = ' ';
+            int l = 0; while(argv[i][l]) file_buf[pos++] = argv[i][l++];
+        }
+        file_buf[pos] = '\0';
+        input = file_buf;
+        input_len = pos;
+    }
+
+    /* Tokenize */
+    #define MAX_INPUT_TOKENS 65536
+    int tokens[MAX_INPUT_TOKENS];
+    int num_tokens = tokenize(input, input_len, tokens, MAX_INPUT_TOKENS);
+    free(file_buf);
+
+    if (num_tokens < 0) {
+        return EXIT_FAILURE;
+    }
+
+    /* Parse */
     int result = parse(tokens, num_tokens);
     return (result == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -8,6 +8,9 @@ name = "LR1Generator"
 [[lean_lib]]
 name = "eBNFparser"
 
+[[lean_lib]]
+name = "lexer"
+
 [[lean_exe]]
 name = "lr1-generator"
 root = "Main"
