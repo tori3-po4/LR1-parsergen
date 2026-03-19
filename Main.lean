@@ -3,16 +3,14 @@ import eBNFparser
 import lexer
 
 def usage : String :=
-  "Usage: lr1-generator <grammar.ebnf> [output.c]\n\n" ++
-  "eBNF 文法ファイルから LR(1) パーサーの C コードを生成します。\n" ++
+  "Usage: lr1-generator <grammar.ebnf> <lexer.lex> [output.c]\n\n" ++
+  "eBNF 文法ファイルとレキサー定義ファイルから\n" ++
+  "LR(1) パーサーの C コードを生成します。\n" ++
   "出力ファイルを省略した場合は parser.c に出力します。"
 
 def main (args : List String) : IO UInt32 := do
   match args with
-  | [] =>
-    IO.eprintln usage
-    return 1
-  | inputPath :: rest =>
+  | inputPath :: lexerPath :: rest =>
     let outputPath := match rest with
       | outPath :: _ => outPath
       | [] => "parser.c"
@@ -49,11 +47,24 @@ def main (args : List String) : IO UInt32 := do
         for c in table.conflicts do
           IO.eprintln s!"  {c}"
 
-      -- 5. レキサー + パーサーの C コード生成
-      let terminals := collectTerminals g
-      let toTokName := fun t => s!"TOK_{toCIdentifier t.toUpper}"
-      let lexerCode := generateLexerC terminals toTokName
-      writeCFile outputPath g table (middleCode := "\n" ++ lexerCode ++ "\n")
-      IO.println s!"[5/5] 完了: {outputPath}"
+      -- レキサー定義ファイルの読み込み
+      let lexContent ← IO.FS.readFile lexerPath
+      IO.println s!"  レキサー定義 {lexerPath} を読み込みました ({lexContent.length} bytes)"
+      match (lexerDefParser.run lexContent : Except String LexerDef) with
+      | Except.error msg =>
+        IO.eprintln s!"レキサー定義パースエラー: {msg}"
+        return 1
+      | Except.ok lexerDef =>
+        IO.println s!"  トークンルール: {lexerDef.tokens.size} 個、スキップルール: {lexerDef.skips.size} 個"
 
-      return 0
+        -- 5. レキサー + パーサーの C コード生成
+        let terminals := collectTerminals g
+        let toTokName := fun t => s!"TOK_{toCIdentifier t.toUpper}"
+        let lexerCode := generateLexerC terminals toTokName lexerDef
+        writeCFile outputPath g table (middleCode := "\n" ++ lexerCode ++ "\n")
+        IO.println s!"[5/5] 完了: {outputPath}"
+
+        return 0
+  | _ =>
+    IO.eprintln usage
+    return 1
